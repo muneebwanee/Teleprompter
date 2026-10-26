@@ -1,0 +1,255 @@
+name: Build Unsigned Teleprompter iOS IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+permissions:
+  contents: write
+
+jobs:
+  build-ipa:
+    runs-on: macos-14
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Unpack Project Archive
+        run: |
+          if [ -f "Teleprompter_iOS_XcodeProject.zip" ]; then
+            unzip -o Teleprompter_iOS_XcodeProject.zip
+          elif [ -f "FlowPrompt_iOS_XcodeProject.zip" ]; then
+            unzip -o FlowPrompt_iOS_XcodeProject.zip
+          fi
+          if [ -d "Teleprompter-iOS" ]; then
+            cp -R Teleprompter-iOS/* .
+          elif [ -d "FlowPrompt-iOS" ]; then
+            cp -R FlowPrompt-iOS/* .
+          fi
+
+      - name: Prepare Minimalist Teleprompter AppIcon Asset Catalog (Zero-Dependency Python Stdlib + macOS sips)
+        run: |
+          python3 - << 'PYEOF'
+          import os, json, subprocess, zlib, struct, math
+          from pathlib import Path
+
+          app_dir = Path("Teleprompter") if Path("Teleprompter").exists() else Path("FlowPrompt")
+          iconset = app_dir / "Assets.xcassets/AppIcon.appiconset"
+          iconset.mkdir(parents=True, exist_ok=True)
+          (app_dir / "Assets.xcassets/Contents.json").write_text(
+              json.dumps({"info": {"author": "xcode", "version": 1}}, indent=2)
+          )
+
+          def generate_master_icon_stdlib(filename, size=512):
+              # Minimalist Teleprompter Lens & Eye-Line Icon (Soft Ink #222220 & Warm Paper #F5F5F3)
+              ink = (34, 34, 32)
+              paper = (245, 245, 243)
+              rows = []
+
+              def mix(c1, c2, t):
+                  t = max(0.0, min(1.0, t))
+                  return (
+                      int(round(c1[0] * (1.0 - t) + c2[0] * t)),
+                      int(round(c1[1] * (1.0 - t) + c2[1] * t)),
+                      int(round(c1[2] * (1.0 - t) + c2[2] * t)),
+                  )
+
+              def sd_rounded_box(px, py, cx, cy, bw, bh, rad):
+                  qx = abs(px - cx) - bw + rad
+                  qy = abs(py - cy) - bh + rad
+                  return math.hypot(max(qx, 0.0), max(qy, 0.0)) + min(max(qx, qy), 0.0) - rad
+
+              for y in range(size):
+                  row = bytearray([0])
+                  ny = (y + 0.5) / float(size)
+                  for x in range(size):
+                      nx = (x + 0.5) / float(size)
+                      col = ink
+
+                      d_frame = abs(sd_rounded_box(nx, ny, 0.5, 0.5, 0.36, 0.36, 0.08)) - 0.008
+                      if d_frame < 0.004:
+                          alpha = max(0.0, min(1.0, (0.004 - d_frame) / 0.004)) * 0.38
+                          col = mix(col, paper, alpha)
+
+                      d_cam_center = math.hypot(nx - 0.5, ny - 0.255)
+                      d_ring = abs(d_cam_center - 0.048) - 0.0075
+                      if d_ring < 0.004:
+                          alpha = max(0.0, min(1.0, (0.004 - d_ring) / 0.004)) * 0.92
+                          col = mix(col, paper, alpha)
+                      if d_cam_center < 0.018:
+                          alpha = max(0.0, min(1.0, (0.018 - d_cam_center) / 0.004))
+                          col = mix(col, paper, alpha)
+
+                      if 0.485 <= ny <= 0.595 and 0.16 <= nx <= 0.84:
+                          col = mix(col, paper, 0.08)
+
+                      if 0.195 <= nx <= 0.245:
+                          half_h = 0.028 * (1.0 - (nx - 0.195) / 0.05)
+                          if abs(ny - 0.54) <= half_h:
+                              col = paper
+                      if 0.755 <= nx <= 0.805:
+                          half_h = 0.028 * ((nx - 0.755) / 0.05)
+                          if abs(ny - 0.54) <= half_h:
+                              col = paper
+
+                      d_line1 = sd_rounded_box(nx, ny, 0.5, 0.42, 0.18, 0.015, 0.015)
+                      if d_line1 < 0.003:
+                          alpha = max(0.0, min(1.0, (0.003 - d_line1) / 0.003)) * 0.42
+                          col = mix(col, paper, alpha)
+
+                      d_line2 = sd_rounded_box(nx, ny, 0.5, 0.54, 0.21, 0.021, 0.021)
+                      if d_line2 < 0.003:
+                          alpha = max(0.0, min(1.0, (0.003 - d_line2) / 0.003))
+                          col = mix(col, paper, alpha)
+
+                      d_line3 = sd_rounded_box(nx, ny, 0.46, 0.66, 0.14, 0.015, 0.015)
+                      if d_line3 < 0.003:
+                          alpha = max(0.0, min(1.0, (0.003 - d_line3) / 0.003)) * 0.42
+                          col = mix(col, paper, alpha)
+
+                      row.extend(col)
+                  rows.append(bytes(row))
+
+              raw = b"".join(rows)
+              def chunk(tag, data):
+                  return (
+                      struct.pack(">I", len(data))
+                      + tag
+                      + data
+                      + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+                  )
+
+              png = b"\x89PNG\r\n\x1a\n"
+              png += chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0))
+              png += chunk(b"IDAT", zlib.compress(raw, 6))
+              png += chunk(b"IEND", b"")
+              Path(filename).write_bytes(png)
+
+          master_icon = iconset / "AppIcon.png"
+          generate_master_icon_stdlib(master_icon, 512)
+
+          sizes = [
+              ("Icon-20@2x.png", 40, "20x20", "2x", "iphone"),
+              ("Icon-20@3x.png", 60, "20x20", "3x", "iphone"),
+              ("Icon-29@2x.png", 58, "29x29", "2x", "iphone"),
+              ("Icon-29@3x.png", 87, "29x29", "3x", "iphone"),
+              ("Icon-40@2x.png", 80, "40x40", "2x", "iphone"),
+              ("Icon-40@3x.png", 120, "40x40", "3x", "iphone"),
+              ("Icon-60@2x.png", 120, "60x60", "2x", "iphone"),
+              ("Icon-60@3x.png", 180, "60x60", "3x", "iphone"),
+              ("Icon-20~ipad.png", 20, "20x20", "1x", "ipad"),
+              ("Icon-20@2x~ipad.png", 40, "20x20", "2x", "ipad"),
+              ("Icon-29~ipad.png", 29, "29x29", "1x", "ipad"),
+              ("Icon-29@2x~ipad.png", 58, "29x29", "2x", "ipad"),
+              ("Icon-40~ipad.png", 40, "40x40", "1x", "ipad"),
+              ("Icon-40@2x~ipad.png", 80, "40x40", "2x", "ipad"),
+              ("Icon-76~ipad.png", 76, "76x76", "1x", "ipad"),
+              ("Icon-76@2x~ipad.png", 152, "76x76", "2x", "ipad"),
+              ("Icon-83.5@2x~ipad.png", 167, "83.5x83.5", "2x", "ipad"),
+              ("Icon-1024.png", 1024, "1024x1024", "1x", "ios-marketing"),
+          ]
+
+          images_json = []
+          for fname, px, pt_str, scale, idiom in sizes:
+              out_file = iconset / fname
+              subprocess.run(
+                  ["sips", "-z", str(px), str(px), str(master_icon), "--out", str(out_file)],
+                  check=True
+              )
+              images_json.append({
+                  "filename": fname,
+                  "idiom": idiom,
+                  "scale": scale,
+                  "size": pt_str
+              })
+
+          (iconset / "Contents.json").write_text(json.dumps({
+              "images": images_json,
+              "info": {"author": "xcode", "version": 1}
+          }, indent=2))
+          PYEOF
+
+      - name: Compile Unsigned Release Teleprompter.app (arm64)
+        run: |
+          if [ -d "Teleprompter.xcodeproj" ]; then
+            PROJ="Teleprompter.xcodeproj"
+            SCHEME="Teleprompter"
+          else
+            PROJ="FlowPrompt.xcodeproj"
+            SCHEME="FlowPrompt"
+          fi
+          xcodebuild build \
+            -project "$PROJ" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build_output \
+            ASSETCATALOG_COMPILER_APPICON_NAME=AppIcon \
+            INFOPLIST_KEY_CFBundleDisplayName=Teleprompter \
+            MARKETING_VERSION=0.0.1 \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Compile & Embed AppIcon into .app Bundle & Info.plist
+        run: |
+          if [ -d "build_output/Build/Products/Release-iphoneos/Teleprompter.app" ]; then
+            APP_BUNDLE="build_output/Build/Products/Release-iphoneos/Teleprompter.app"
+          else
+            APP_BUNDLE="build_output/Build/Products/Release-iphoneos/FlowPrompt.app"
+          fi
+          if [ -d "Teleprompter/Assets.xcassets" ]; then
+            ASSETS_DIR="Teleprompter/Assets.xcassets"
+          else
+            ASSETS_DIR="FlowPrompt/Assets.xcassets"
+          fi
+
+          xcrun actool "$ASSETS_DIR" \
+            --compile "$APP_BUNDLE" \
+            --platform iphoneos \
+            --minimum-deployment-target 16.0 \
+            --app-icon AppIcon \
+            --output-partial-info-plist build_output/assetcatalog_info.plist
+
+          /usr/libexec/PlistBuddy -c "Merge build_output/assetcatalog_info.plist" "$APP_BUNDLE/Info.plist" || true
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName Teleprompter" "$APP_BUNDLE/Info.plist" || \
+          /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string Teleprompter" "$APP_BUNDLE/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 0.0.1" "$APP_BUNDLE/Info.plist" || true
+
+          cp "$ASSETS_DIR/AppIcon.appiconset/Icon-60@2x.png" "$APP_BUNDLE/AppIcon60x60@2x.png"
+          cp "$ASSETS_DIR/AppIcon.appiconset/Icon-60@3x.png" "$APP_BUNDLE/AppIcon60x60@3x.png"
+          cp "$ASSETS_DIR/AppIcon.appiconset/Icon-76@2x~ipad.png" "$APP_BUNDLE/AppIcon76x76@2x~ipad.png"
+          cp "$ASSETS_DIR/AppIcon.appiconset/Icon-83.5@2x~ipad.png" "$APP_BUNDLE/AppIcon83.5x83.5@2x~ipad.png"
+
+      - name: Ensure Native iOS & iPadOS Home Screen Widgets (.appex) Embedded in PlugIns
+        run: |
+          APP_BUNDLE="build_output/Build/Products/Release-iphoneos/Teleprompter.app"
+          WIDGET_APPEX="build_output/Build/Products/Release-iphoneos/TeleprompterWidgets.appex"
+          mkdir -p "$APP_BUNDLE/PlugIns"
+          if [ -d "$WIDGET_APPEX" ] && [ ! -d "$APP_BUNDLE/PlugIns/TeleprompterWidgets.appex" ]; then
+            cp -R "$WIDGET_APPEX" "$APP_BUNDLE/PlugIns/"
+          fi
+          ls -la "$APP_BUNDLE/PlugIns"
+
+      - name: Package Teleprompter-iOS-Universal.ipa
+        run: |
+          rm -rf Payload Teleprompter-iOS-Universal.ipa
+          mkdir -p Payload
+          cp -R build_output/Build/Products/Release-iphoneos/Teleprompter.app Payload/
+          zip -r9 Teleprompter-iOS-Universal.ipa Payload
+
+      - name: Upload IPA to Workflow Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Teleprompter-iOS-Universal-IPA
+          path: Teleprompter-iOS-Universal.ipa
+
+      - name: Publish Direct .ipa to GitHub Releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete v0.0.1 --yes || true
+          gh release create v0.0.1 Teleprompter-iOS-Universal.ipa \
+            --title "Teleprompter v0.0.1 (Universal iOS & iPadOS IPA)" \
+            --notes "Unsigned .ipa build of Teleprompter v0.0.1 with minimalist Teleprompter Lens & Eye-Line AppIcon, strict two-color Warm Paper (#F5F5F3) and Soft Ink (#222220) palette, live draggable/resizable script area while recording, post-capture video trimmer, and embedded iOS & iPadOS Home Screen Widgets."
