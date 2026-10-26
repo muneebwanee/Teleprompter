@@ -234,6 +234,9 @@ jobs:
 
       - name: Compile Unsigned Release Teleprompter.app (arm64)
         run: |
+          if [ -f "Teleprompter/Views/SettingsDrawerView.swift" ]; then
+            sed -i '' 's/\$settings\.livestreamStream Type/\$settings.livestreamProtocol/g' Teleprompter/Views/SettingsDrawerView.swift || true
+          fi
           xcodebuild build \
             -project Teleprompter.xcodeproj \
             -scheme Teleprompter \
