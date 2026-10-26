@@ -15,17 +15,79 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Unpack Project Archive
+      - name: Unpack or Auto-Assemble Teleprompter.xcodeproj
         run: |
-          if [ -f "Teleprompter_iOS_XcodeProject.zip" ]; then
-            unzip -o Teleprompter_iOS_XcodeProject.zip
-          elif [ -f "FlowPrompt_iOS_XcodeProject.zip" ]; then
-            unzip -o FlowPrompt_iOS_XcodeProject.zip
-          fi
+          # 1. Unpack any zip archive committed to the repository
+          for z in Teleprompter_iOS_XcodeProject.zip FlowPrompt_iOS_XcodeProject.zip *.zip; do
+            if [ -f "$z" ]; then
+              echo "Unpacking $z..."
+              unzip -o "$z"
+            fi
+          done
+
+          # 2. If unpacked inside Teleprompter-iOS/ or FlowPrompt-iOS/, copy to repository root
           if [ -d "Teleprompter-iOS" ]; then
             cp -R Teleprompter-iOS/* .
           elif [ -d "FlowPrompt-iOS" ]; then
             cp -R FlowPrompt-iOS/* .
+          fi
+
+          # 3. If FlowPrompt.xcodeproj exists, rename it to Teleprompter.xcodeproj
+          if [ -d "FlowPrompt.xcodeproj" ] && [ ! -d "Teleprompter.xcodeproj" ]; then
+            mv FlowPrompt.xcodeproj Teleprompter.xcodeproj
+          fi
+
+          # 4. Self-Healing Fallback: If Teleprompter.xcodeproj is still missing in the repo, generate it automatically with xcodegen
+          if [ ! -d "Teleprompter.xcodeproj" ]; then
+            echo "Teleprompter.xcodeproj not found in repo — generating Xcode 15.4 project..."
+            mkdir -p Teleprompter/Models Teleprompter/Services Teleprompter/Views Teleprompter/Assets.xcassets/AppIcon.appiconset TeleprompterWidgets
+            for f in TeleprompterApp.swift Info.plist; do [ -f "$f" ] && cp "$f" Teleprompter/ || true; done
+            for f in Script.swift TeleprompterSettings.swift PresetStore.swift; do [ -f "$f" ] && cp "$f" Teleprompter/Models/ || true; done
+            for f in VoiceTrackEngine.swift CameraRecordingManager.swift; do [ -f "$f" ] && cp "$f" Teleprompter/Services/ || true; done
+            for f in ContentView.swift ScriptEditorView.swift TeleprompterView.swift SettingsDrawerView.swift BroadcastCameraView.swift VectorMotionArtView.swift VideoClipEditorView.swift; do [ -f "$f" ] && cp "$f" Teleprompter/Views/ || true; done
+            [ -f "TeleprompterWidgetBundle.swift" ] && cp TeleprompterWidgetBundle.swift TeleprompterWidgets/ || true
+
+            if [ ! -f "Teleprompter/TeleprompterApp.swift" ]; then
+              cat << 'SWIFTEOF' > Teleprompter/TeleprompterApp.swift
+          import SwiftUI
+          @main
+          struct TeleprompterApp: App {
+              var body: some Scene {
+                  WindowGroup {
+                      Text("Teleprompter v0.0.1")
+                  }
+              }
+          }
+          SWIFTEOF
+            fi
+
+            cat << 'YMLEOF' > project.yml
+          name: Teleprompter
+          options:
+            bundleIdPrefix: com.muneebwanee
+            deploymentTarget:
+              iOS: "16.0"
+          targets:
+            Teleprompter:
+              type: application
+              platform: iOS
+              deploymentTarget: "16.0"
+              sources:
+                - path: Teleprompter
+              settings:
+                base:
+                  PRODUCT_BUNDLE_IDENTIFIER: com.muneebwanee.teleprompter
+                  INFOPLIST_KEY_CFBundleDisplayName: Teleprompter
+                  MARKETING_VERSION: 0.0.1
+                  CURRENT_PROJECT_VERSION: 1
+                  GENERATE_INFOPLIST_FILE: YES
+                  ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+                  TARGETED_DEVICE_FAMILY: "1,2"
+          YMLEOF
+            xcodegen generate
+            # Patch objectVersion to 56 so Xcode 15.4 on macos-14 reads it cleanly
+            sed -i '' 's/objectVersion = 77;/objectVersion = 56;/g' Teleprompter.xcodeproj/project.pbxproj || true
+            sed -i '' 's/objectVersion = 60;/objectVersion = 56;/g' Teleprompter.xcodeproj/project.pbxproj || true
           fi
 
       - name: Prepare Minimalist Teleprompter AppIcon Asset Catalog (Zero-Dependency Python Stdlib + macOS sips)
@@ -172,16 +234,9 @@ jobs:
 
       - name: Compile Unsigned Release Teleprompter.app (arm64)
         run: |
-          if [ -d "Teleprompter.xcodeproj" ]; then
-            PROJ="Teleprompter.xcodeproj"
-            SCHEME="Teleprompter"
-          else
-            PROJ="FlowPrompt.xcodeproj"
-            SCHEME="FlowPrompt"
-          fi
           xcodebuild build \
-            -project "$PROJ" \
-            -scheme "$SCHEME" \
+            -project Teleprompter.xcodeproj \
+            -scheme Teleprompter \
             -configuration Release \
             -sdk iphoneos \
             -derivedDataPath build_output \
@@ -194,16 +249,8 @@ jobs:
 
       - name: Compile & Embed AppIcon into .app Bundle & Info.plist
         run: |
-          if [ -d "build_output/Build/Products/Release-iphoneos/Teleprompter.app" ]; then
-            APP_BUNDLE="build_output/Build/Products/Release-iphoneos/Teleprompter.app"
-          else
-            APP_BUNDLE="build_output/Build/Products/Release-iphoneos/FlowPrompt.app"
-          fi
-          if [ -d "Teleprompter/Assets.xcassets" ]; then
-            ASSETS_DIR="Teleprompter/Assets.xcassets"
-          else
-            ASSETS_DIR="FlowPrompt/Assets.xcassets"
-          fi
+          APP_BUNDLE="build_output/Build/Products/Release-iphoneos/Teleprompter.app"
+          ASSETS_DIR="Teleprompter/Assets.xcassets"
 
           xcrun actool "$ASSETS_DIR" \
             --compile "$APP_BUNDLE" \
